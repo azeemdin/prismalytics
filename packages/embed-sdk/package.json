@@ -1,0 +1,26 @@
+{
+  "name": "@prismalytics/embed-sdk",
+  "version": "1.0.0",
+  "description": "Embed prismalytics dashboards into any web page",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": ["dist", "src"],
+  "scripts": {
+    "build": "tsc",
+    "type-check": "tsc --noEmit",
+    "clean": "rimraf dist .turbo",
+    "lint": "echo 'no lint configured'"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.0",
+    "rimraf": "^6.0.0"
+  }
+}
