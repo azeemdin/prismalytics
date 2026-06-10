@@ -801,11 +801,12 @@ function ChartBuilderModal({
 
 export default function ChartLibraryPage() {
   const qc = useQueryClient();
-  const { message } = App.useApp();
+  const { message, modal } = App.useApp();
   const [builderOpen, setBuilderOpen] = useState(false);
   const [editingChart, setEditingChart] = useState<Visualization | null>(null);
   const [searchText, setSearchText] = useState('');
   const [filterDatasource, setFilterDatasource] = useState<string>('');
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
   const { data: library = [], isLoading } = useQuery<Visualization[]>({
     queryKey: ['chart-library'],
@@ -841,9 +842,44 @@ export default function ChartLibraryPage() {
     mutationFn: (id: string) => api.delete(`/visualizations/${id}`),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ['chart-library'] });
-      message.success('Chart removed from library');
+      message.success('Chart deleted');
     },
   });
+
+  const bulkDeleteMutation = useMutation({
+    mutationFn: (ids: string[]) => Promise.all(ids.map((id) => api.delete(`/visualizations/${id}`))),
+    onSuccess: (_data, ids) => {
+      void qc.invalidateQueries({ queryKey: ['chart-library'] });
+      setSelectedIds(new Set());
+      message.success(`${ids.length} chart${ids.length !== 1 ? 's' : ''} deleted`);
+    },
+    onError: () => message.error('Failed to delete some charts'),
+  });
+
+  const toggleSelect = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const selectAll = () => setSelectedIds(new Set(filteredLibrary.map((v) => v.id)));
+  const clearSelection = () => setSelectedIds(new Set());
+
+  const confirmBulkDelete = () => {
+    const ids = [...selectedIds];
+    const hasDashboard = ids.some((id) => library.find((v) => v.id === id)?.dashboardId);
+    modal.confirm({
+      title: `Delete ${ids.length} chart${ids.length !== 1 ? 's' : ''}?`,
+      content: hasDashboard
+        ? 'Some selected charts are part of a dashboard and will be removed from it.'
+        : 'This cannot be undone.',
+      okText: 'Delete',
+      okButtonProps: { danger: true },
+      onOk: () => bulkDeleteMutation.mutate(ids),
+    });
+  };
 
   const openEdit = (viz: Visualization) => { setEditingChart(viz); setBuilderOpen(true); };
   const openNew = () => { setEditingChart(null); setBuilderOpen(true); };
@@ -861,7 +897,7 @@ export default function ChartLibraryPage() {
       </div>
 
       {library.length > 0 && (
-        <Space style={{ marginBottom: 16 }} size={8}>
+        <div style={{ marginBottom: 16, display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
           <Input
             prefix={<SearchOutlined style={{ color: 'var(--color-text-secondary)' }} />}
             placeholder="Search by name..."
@@ -878,12 +914,24 @@ export default function ChartLibraryPage() {
             style={{ width: 220 }}
             options={datasourceOptions}
           />
-          {(searchText || filterDatasource) && (
+          <Button size="small" onClick={selectedIds.size === filteredLibrary.length ? clearSelection : selectAll}>
+            {selectedIds.size === filteredLibrary.length && filteredLibrary.length > 0 ? 'Deselect All' : 'Select All'}
+          </Button>
+          {selectedIds.size > 0 && (
+            <>
+              <Text type="secondary" style={{ fontSize: 12 }}>{selectedIds.size} selected</Text>
+              <Button size="small" danger icon={<DeleteOutlined />} onClick={confirmBulkDelete} loading={bulkDeleteMutation.isPending}>
+                Delete Selected
+              </Button>
+              <Button size="small" onClick={clearSelection}>Clear</Button>
+            </>
+          )}
+          {(searchText || filterDatasource) && selectedIds.size === 0 && (
             <Text type="secondary" style={{ fontSize: 12 }}>
               {filteredLibrary.length} of {library.length} chart{library.length !== 1 ? 's' : ''}
             </Text>
           )}
-        </Space>
+        </div>
       )}
 
       {library.length === 0 && !isLoading ? (
@@ -910,24 +958,39 @@ export default function ChartLibraryPage() {
         </Card>
       ) : (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 16 }}>
-          {filteredLibrary.map((viz) => (
+          {filteredLibrary.map((viz) => {
+            const isSelected = selectedIds.has(viz.id);
+            return (
             <Card
               key={viz.id}
               size="small"
               hoverable
+              style={{ borderColor: isSelected ? '#6366f1' : undefined, borderWidth: isSelected ? 2 : 1 }}
               actions={[
                 <Button key="edit" size="small" icon={<EditOutlined />} onClick={() => openEdit(viz)}>Edit</Button>,
                 <Popconfirm
                   key="delete"
-                  title="Remove from library?"
-                  description="Dashboards using this chart are not affected."
+                  title="Delete this chart?"
+                  description={
+                    viz.dashboardId
+                      ? 'This chart is part of a dashboard. Deleting it will remove it from that dashboard too.'
+                      : 'This will permanently delete the chart.'
+                  }
                   onConfirm={() => deleteMutation.mutate(viz.id)}
                   okButtonProps={{ danger: true }}
                 >
-                  <Button size="small" danger icon={<DeleteOutlined />}>Remove</Button>
+                  <Button size="small" danger icon={<DeleteOutlined />}>Delete</Button>
                 </Popconfirm>,
               ]}
             >
+              <div style={{ position: 'relative' }}>
+                <input
+                  type="checkbox"
+                  checked={isSelected}
+                  onChange={() => toggleSelect(viz.id)}
+                  style={{ position: 'absolute', top: 0, right: 0, width: 16, height: 16, cursor: 'pointer', accentColor: '#6366f1' }}
+                />
+              </div>
               <Space align="start" style={{ width: '100%' }}>
                 <span style={{ fontSize: 30, color: 'var(--color-accent)', lineHeight: 1.2, marginTop: 2 }}>
                   {CHART_ICONS[viz.chartType]}
@@ -938,6 +1001,9 @@ export default function ChartLibraryPage() {
                   </Text>
                   <Space size={4} style={{ marginTop: 4 }} wrap>
                     <Tag style={{ fontSize: 11 }}>{viz.chartType}</Tag>
+                    {viz.dashboardId && (
+                      <Tag color="purple" style={{ fontSize: 11 }}>Dashboard</Tag>
+                    )}
                     {viz.query?.name && (
                       <Text type="secondary" style={{ fontSize: 11 }}>
                         {viz.query.name}
@@ -959,7 +1025,8 @@ export default function ChartLibraryPage() {
                 </div>
               </Space>
             </Card>
-          ))}
+          );
+          })}
         </div>
       )}
 

@@ -23,6 +23,6 @@ export interface DatabaseConnector {
   query(sql: string, params?: unknown[], targetDatabase?: string): Promise<QueryResult>;
   getDatabases(): Promise<string[]>;
   getCollections(database: string): Promise<string[]>;
-  getSchema(): Promise<SchemaInfo>;
+  getSchema(schema?: string): Promise<SchemaInfo>;
   close(): Promise<void>;
 }

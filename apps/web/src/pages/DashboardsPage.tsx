@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Typography,
@@ -16,11 +16,11 @@ import {
   Space,
   Tag,
   Tooltip,
-  Popconfirm,
   App,
   Spin,
   List,
   Avatar,
+  Upload,
 } from 'antd';
 import {
   DashboardOutlined,
@@ -33,11 +33,15 @@ import {
   MinusCircleOutlined,
   ShareAltOutlined,
   UserOutlined,
+  ThunderboltOutlined,
+  DownloadOutlined,
+  UploadOutlined,
 } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import api from '../services/api';
-import type { Dashboard, DashboardSharee, User } from '../types';
+import type { Dashboard, DashboardSharee, QueryFolder, User } from '../types';
 import { useAuthStore } from '../stores/auth.store';
+import AutoDashboardWizard from '../components/ai/AutoDashboardWizard';
 
 const { Title, Text } = Typography;
 const { Option } = Select;
@@ -65,8 +69,10 @@ export default function DashboardsPage() {
   const { data, isLoading } = useDashboards();
   const dashboards = data?.dashboards ?? [];
   const isViewer = useAuthStore((s) => s.user?.role === 'viewer');
+  const currentUser = useAuthStore((s) => s.user);
 
   const [showCreate, setShowCreate] = useState(false);
+  const [showAutoDashboard, setShowAutoDashboard] = useState(false);
   const [form] = Form.useForm();
 
   const [editingDashboard, setEditingDashboard] = useState<Dashboard | null>(null);
@@ -74,6 +80,8 @@ export default function DashboardsPage() {
 
   const [sharingDashboard, setSharingDashboard] = useState<Dashboard | null>(null);
   const [shareUserId, setShareUserId] = useState<string | undefined>();
+  const [deleteTarget, setDeleteTarget] = useState<{ dashboard: Dashboard; autoFolderId: string | null } | null>(null);
+  const [importLoading, setImportLoading] = useState(false);
 
   const { data: sharees = [], isFetching: shareesLoading } = useQuery<DashboardSharee[]>({
     queryKey: ['dashboard-sharees', sharingDashboard?.id],
@@ -157,11 +165,68 @@ export default function DashboardsPage() {
     mutationFn: (id: string) => api.delete(`/dashboards/${id}`),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['dashboards'] });
+      qc.invalidateQueries({ queryKey: ['query-folders'] });
+      qc.invalidateQueries({ queryKey: ['queries'] });
+      setDeleteTarget(null);
       message.success('Dashboard deleted');
     },
   });
 
-  const duplicateMutation = useMutation({
+  const deleteFolderMutation = useMutation({
+    mutationFn: (id: string) => api.delete(`/query-folders/${id}`),
+  });
+
+  const handleDeleteDashboard = useCallback(async (dashboard: Dashboard) => {
+    let autoFolderId: string | null = null;
+    try {
+      const { data } = await api.get('/query-folders');
+      const folders: QueryFolder[] = Array.isArray(data.data ?? data) ? (data.data ?? data) : [];
+      autoFolderId = folders.find((f) => f.name === dashboard.name)?.id ?? null;
+    } catch {
+      // non-fatal
+    }
+    setDeleteTarget({ dashboard, autoFolderId });
+  }, []);
+
+  const handleExport = useCallback(async (dashboard: Dashboard) => {
+    try {
+      const { data } = await api.get(`/dashboards/${dashboard.id}/export`);
+      const bundle = data.data ?? data;
+      const json = JSON.stringify(bundle, null, 2);
+      const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `dashboard-${dashboard.name.replace(/[^a-z0-9]/gi, '_').toLowerCase()}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      message.error('Export failed');
+    }
+  }, [message]);
+
+  const handleImport = useCallback(async (file: File) => {
+    setImportLoading(true);
+    try {
+      const text = await file.text();
+      const bundle = JSON.parse(text) as unknown;
+      const { data } = await api.post('/dashboards/import', bundle);
+      const result = (data.data ?? data) as { dashboard: { id: string; name: string }; newDatasourceIds: string[] };
+      qc.invalidateQueries({ queryKey: ['dashboards'] });
+      if (result.newDatasourceIds?.length) {
+        message.success(`Dashboard "${result.dashboard.name}" imported. ${result.newDatasourceIds.length} new datasource(s) created — please add credentials in Settings.`);
+      } else {
+        message.success(`Dashboard "${result.dashboard.name}" imported.`);
+      }
+    } catch {
+      message.error('Import failed — invalid bundle file');
+    } finally {
+      setImportLoading(false);
+    }
+    return false; // prevent default upload behaviour
+  }, [message, qc]);
+
+    const duplicateMutation = useMutation({
     mutationFn: (id: string) => api.post(`/dashboards/${id}/duplicate`),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['dashboards'] });
@@ -177,9 +242,31 @@ export default function DashboardsPage() {
           <Text type="secondary">Create and manage interactive dashboards</Text>
         </div>
         {!isViewer && (
-          <Button type="primary" icon={<PlusOutlined />} size="large" onClick={() => setShowCreate(true)}>
-            New Dashboard
-          </Button>
+          <Space>
+            {currentUser?.aiEnabled !== false && (
+              <Tooltip title="Let AI analyze a datasource and generate a dashboard automatically">
+                <Button
+                  icon={<ThunderboltOutlined />}
+                  size="large"
+                  onClick={() => setShowAutoDashboard(true)}
+                >
+                  Auto Dashboard
+                </Button>
+              </Tooltip>
+            )}
+            <Upload
+              accept=".json"
+              showUploadList={false}
+              beforeUpload={(file) => { void handleImport(file); return false; }}
+            >
+              <Button icon={<UploadOutlined />} size="large" loading={importLoading}>
+                Import
+              </Button>
+            </Upload>
+            <Button type="primary" icon={<PlusOutlined />} size="large" onClick={() => setShowCreate(true)}>
+              New Dashboard
+            </Button>
+          </Space>
         )}
       </div>
 
@@ -248,14 +335,10 @@ export default function DashboardsPage() {
                     <Tooltip key="settings" title="Settings"><SettingOutlined onClick={() => openEditModal(d)} /></Tooltip>,
                     <Tooltip key="share" title="Manage access"><ShareAltOutlined onClick={() => setSharingDashboard(d)} /></Tooltip>,
                     <Tooltip key="dup" title="Duplicate"><CopyOutlined onClick={() => duplicateMutation.mutate(d.id)} /></Tooltip>,
-                    <Popconfirm
-                      key="del"
-                      title="Delete this dashboard?"
-                      onConfirm={() => deleteMutation.mutate(d.id)}
-                      okButtonProps={{ danger: true }}
-                    >
-                      <DeleteOutlined style={{ color: '#ef4444' }} />
-                    </Popconfirm>,
+                    <Tooltip key="export" title="Export dashboard"><DownloadOutlined onClick={() => void handleExport(d)} /></Tooltip>,
+                    <Tooltip key="del" title="Delete dashboard">
+                      <DeleteOutlined style={{ color: '#ef4444', cursor: 'pointer' }} onClick={() => handleDeleteDashboard(d)} />
+                    </Tooltip>,
                   ] : []),
                 ]}
               >
@@ -457,6 +540,67 @@ export default function DashboardsPage() {
             </List.Item>
           )}
         />
+      </Modal>
+
+      <AutoDashboardWizard open={showAutoDashboard} onClose={() => setShowAutoDashboard(false)} />
+
+      {/* Delete dashboard confirmation — handles both plain and auto-generated content */}
+      <Modal
+        open={!!deleteTarget}
+        title="Delete dashboard?"
+        onCancel={() => setDeleteTarget(null)}
+        width={540}
+        footer={
+          deleteTarget?.autoFolderId ? (
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, flexWrap: 'wrap' }}>
+              <Button onClick={() => setDeleteTarget(null)}>Cancel</Button>
+              <Button
+                danger
+                onClick={() => deleteMutation.mutate(deleteTarget.dashboard.id)}
+                loading={deleteMutation.isPending}
+              >
+                Delete Dashboard Only
+              </Button>
+              <Button
+                danger
+                type="primary"
+                loading={deleteFolderMutation.isPending || deleteMutation.isPending}
+                onClick={async () => {
+                  await deleteFolderMutation.mutateAsync(deleteTarget.autoFolderId!);
+                  deleteMutation.mutate(deleteTarget.dashboard.id);
+                }}
+              >
+                Delete Dashboard + Auto-generated Content
+              </Button>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <Button onClick={() => setDeleteTarget(null)}>Cancel</Button>
+              <Button
+                danger
+                type="primary"
+                onClick={() => deleteTarget && deleteMutation.mutate(deleteTarget.dashboard.id)}
+                loading={deleteMutation.isPending}
+              >
+                Delete
+              </Button>
+            </div>
+          )
+        }
+      >
+        {deleteTarget?.autoFolderId ? (
+          <div>
+            <p>
+              An auto-generated query folder "<strong>{deleteTarget.dashboard.name}</strong>" was found.
+              Do you also want to delete its queries and charts?
+            </p>
+            <p style={{ color: '#6b7280', fontSize: 12, marginTop: 8 }}>
+              Choosing "Delete Dashboard + Auto-generated Content" will permanently remove the folder, all its queries, and their charts.
+            </p>
+          </div>
+        ) : (
+          <p>This cannot be undone.</p>
+        )}
       </Modal>
     </div>
   );

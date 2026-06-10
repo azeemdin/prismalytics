@@ -50,6 +50,7 @@ import {
   CaretRightOutlined,
   CaretDownOutlined,
   FileOutlined,
+  FolderOutlined as FolderMoveIcon,
 } from '@ant-design/icons';
 import Editor from '@monaco-editor/react';
 import { format as formatSql } from 'sql-formatter';
@@ -233,9 +234,10 @@ interface QueryRowProps {
   indent?: number;
   onLoad: (q: SavedQuery) => void;
   onDelete: (id: string) => void;
+  onMove: (q: SavedQuery) => void;
   canDelete: boolean;
 }
-function SavedQueryRow({ q, indent = 0, onLoad, onDelete, canDelete }: QueryRowProps) {
+function SavedQueryRow({ q, indent = 0, onLoad, onDelete, onMove, canDelete }: QueryRowProps) {
   return (
     <div
       style={{
@@ -259,9 +261,14 @@ function SavedQueryRow({ q, indent = 0, onLoad, onDelete, canDelete }: QueryRowP
       <Space size={4}>
         <Button size="small" onClick={() => onLoad(q)}>Load</Button>
         {canDelete && (
-          <Popconfirm title="Delete this query?" onConfirm={() => onDelete(q.id)} okButtonProps={{ danger: true }}>
-            <Button size="small" danger icon={<DeleteOutlined />} />
-          </Popconfirm>
+          <>
+            <Tooltip title="Move to folder">
+              <Button size="small" icon={<FolderMoveIcon />} onClick={() => onMove(q)} />
+            </Tooltip>
+            <Popconfirm title="Delete this query?" onConfirm={() => onDelete(q.id)} okButtonProps={{ danger: true }}>
+              <Button size="small" danger icon={<DeleteOutlined />} />
+            </Popconfirm>
+          </>
         )}
       </Space>
     </div>
@@ -279,15 +286,16 @@ interface FolderSectionProps {
   onDeleteFolder: (id: string) => void;
   onAddSubfolder: (parentId: string) => void;
   onEditFolder: (folder: QueryFolder) => void;
+  onMoveQuery: (q: SavedQuery) => void;
   canModify: boolean;
 }
 function FolderSection({
   node, depth, savedQueries, expandedFolderIds,
-  onToggle, onLoad, onDeleteQuery, onDeleteFolder, onAddSubfolder, onEditFolder, canModify,
+  onToggle, onLoad, onDeleteQuery, onDeleteFolder, onAddSubfolder, onEditFolder, onMoveQuery, canModify,
 }: FolderSectionProps) {
   const isExpanded = expandedFolderIds.has(node.folder.id);
   const folderQueries = savedQueries.filter((q) => q.folderId === node.folder.id);
-  const sharedProps = { savedQueries, expandedFolderIds, onToggle, onLoad, onDeleteQuery, onDeleteFolder, onAddSubfolder, onEditFolder, canModify };
+  const sharedProps = { savedQueries, expandedFolderIds, onToggle, onLoad, onDeleteQuery, onDeleteFolder, onAddSubfolder, onEditFolder, onMoveQuery, canModify };
   return (
     <div>
       <div
@@ -320,7 +328,7 @@ function FolderSection({
               <Button size="small" type="text" icon={<EditOutlined />} style={{ padding: '0 4px' }}
                 onClick={() => onEditFolder(node.folder)} />
             </Tooltip>
-            <Popconfirm title="Delete folder? Queries inside will move to root." okButtonProps={{ danger: true }}
+            <Popconfirm title="Delete folder?" description="All queries inside will be permanently deleted." okButtonProps={{ danger: true }}
               onConfirm={() => onDeleteFolder(node.folder.id)}>
               <Button size="small" type="text" danger icon={<DeleteOutlined />} style={{ padding: '0 4px' }} />
             </Popconfirm>
@@ -333,7 +341,7 @@ function FolderSection({
             <FolderSection key={child.folder.id} node={child} depth={depth + 1} {...sharedProps} />
           ))}
           {folderQueries.map((q) => (
-            <SavedQueryRow key={q.id} q={q} indent={depth + 1} onLoad={onLoad} onDelete={onDeleteQuery} canDelete={canModify} />
+            <SavedQueryRow key={q.id} q={q} indent={depth + 1} onLoad={onLoad} onDelete={onDeleteQuery} onMove={onMoveQuery} canDelete={canModify} />
           ))}
           {node.children.length === 0 && folderQueries.length === 0 && (
             <Text type="secondary" style={{ display: 'block', fontSize: 11, paddingLeft: 8 + (depth + 1) * 20, paddingBottom: 4 }}>
@@ -388,6 +396,7 @@ export default function QueriesPage() {
   const [mongoBuilderKey, setMongoBuilderKey] = useState<string>('new');
   const selectedDs = datasources.find((d) => d.id === selectedDatasource);
   const isMongoDatasource = selectedDs?.type === 'mongodb';
+  const isRestApiDatasource = selectedDs?.type === 'rest_api';
   const [sql, setSql] = useState<string>('SELECT * FROM ');
   const [result, setResult] = useState<QueryResult | null>(null);
   const [queryError, setQueryError] = useState<string | null>(null);
@@ -421,6 +430,8 @@ export default function QueriesPage() {
   const [folderEditTarget, setFolderEditTarget] = useState<QueryFolder | null>(null);
   const [folderModalParentId, setFolderModalParentId] = useState<string | null>(null);
   const [folderForm] = Form.useForm();
+  const [moveQueryTarget, setMoveQueryTarget] = useState<SavedQuery | null>(null);
+  const [moveQueryFolderId, setMoveQueryFolderId] = useState<string | undefined>(undefined);
 
   const { data: savedQueriesData, refetch: refetchQueries } = useSavedQueries();
   const allSavedQueries = savedQueriesData?.queries ?? [];
@@ -616,6 +627,18 @@ export default function QueriesPage() {
       message.success('Folder deleted queries moved to root');
     },
     onError: () => message.error('Failed to delete folder'),
+  });
+
+  const moveQueryMutation = useMutation({
+    mutationFn: ({ id, folderId }: { id: string; folderId: string | null }) =>
+      api.patch(`/queries/${id}`, { folderId: folderId ?? '' }),
+    onSuccess: () => {
+      void refetchQueries();
+      setMoveQueryTarget(null);
+      setMoveQueryFolderId(undefined);
+      message.success('Query moved');
+    },
+    onError: () => message.error('Failed to move query'),
   });
 
   const executeNlToSql = async (schemas: string[], tables: Record<string, string[]> | null) => {
@@ -970,7 +993,9 @@ export default function QueriesPage() {
               setSelectedCollection('');
               if (ds?.type === 'mongodb') {
                 setSql('{\n  "collection": "myCollection",\n  "filter": {},\n  "limit": 100\n}');
-              } else if (isMongoDatasource) {
+              } else if (ds?.type === 'rest_api') {
+                setSql('{\n  "method": "GET",\n  "path": "/"\n}');
+              } else {
                 setSql('SELECT * FROM ');
               }
             }}
@@ -1081,8 +1106,8 @@ export default function QueriesPage() {
           </Text>
         </div>
 
-        {/* NL-to-SQL bar */}
-        <div style={{ display: 'flex', gap: 8, padding: '8px 16px', borderBottom: '1px solid var(--color-border)', background: 'var(--color-bg-primary)' }}>
+        {/* NL-to-SQL bar — hidden for REST API (no SQL generation applicable) */}
+        <div style={{ display: isRestApiDatasource ? 'none' : 'flex', gap: 8, padding: '8px 16px', borderBottom: '1px solid var(--color-border)', background: 'var(--color-bg-primary)' }}>
           <RobotOutlined style={{ color: '#6366f1', fontSize: 16, marginTop: 4 }} />
           <Input
             placeholder="Ask in plain English, e.g. Show top 10 customers by revenue this month"
@@ -1230,7 +1255,7 @@ export default function QueriesPage() {
           {activeTab === 'editor' && (
             <Editor
               height="100%"
-              language={isMongoDatasource ? 'json' : 'sql'}
+              language={isMongoDatasource || isRestApiDatasource ? 'json' : 'sql'}
               value={sql}
               onChange={(v) => setSql(v ?? '')}
               onMount={handleEditorMount}
@@ -1286,6 +1311,7 @@ export default function QueriesPage() {
               onDeleteFolder: (id: string) => deleteFolderMutation.mutate(id),
               onAddSubfolder: handleAddSubfolder,
               onEditFolder: handleEditFolder,
+              onMoveQuery: (q: SavedQuery) => { setMoveQueryTarget(q); setMoveQueryFolderId(q.folderId ?? undefined); },
               canModify: !isViewer,
             };
             return (
@@ -1318,7 +1344,7 @@ export default function QueriesPage() {
                     savedQueries.length === 0
                       ? <Empty description="No queries match your search" image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ marginTop: 40 }} />
                       : savedQueries.map((q) => (
-                        <SavedQueryRow key={q.id} q={q} onLoad={handleLoadQuery} onDelete={(id) => deleteMutation.mutate(id)} canDelete={!isViewer} />
+                        <SavedQueryRow key={q.id} q={q} onLoad={handleLoadQuery} onDelete={(id) => deleteMutation.mutate(id)} onMove={(q) => { setMoveQueryTarget(q); setMoveQueryFolderId(q.folderId ?? undefined); }} canDelete={!isViewer} />
                       ))
                   ) : (
                     <>
@@ -1326,7 +1352,7 @@ export default function QueriesPage() {
                         <FolderSection key={node.folder.id} node={node} depth={0} {...folderSectionProps} />
                       ))}
                       {rootQueries.map((q) => (
-                        <SavedQueryRow key={q.id} q={q} onLoad={handleLoadQuery} onDelete={(id) => deleteMutation.mutate(id)} canDelete={!isViewer} />
+                        <SavedQueryRow key={q.id} q={q} onLoad={handleLoadQuery} onDelete={(id) => deleteMutation.mutate(id)} onMove={(q) => { setMoveQueryTarget(q); setMoveQueryFolderId(q.folderId ?? undefined); }} canDelete={!isViewer} />
                       ))}
                       {folderTree.length === 0 && rootQueries.length === 0 && (
                         <Empty description="No saved queries yet" image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ marginTop: 40 }} />
@@ -1602,7 +1628,38 @@ export default function QueriesPage() {
         </Form>
       </Modal>
 
-      {/* AI Report Modal */}
+      {/* Move Query Modal */}
+      <Modal
+        title={`Move "${moveQueryTarget?.name ?? ''}" to folder`}
+        open={!!moveQueryTarget}
+        onCancel={() => { setMoveQueryTarget(null); setMoveQueryFolderId(undefined); }}
+        footer={
+          <Space>
+            <Button onClick={() => { setMoveQueryTarget(null); setMoveQueryFolderId(undefined); }}>Cancel</Button>
+            <Button
+              type="primary"
+              loading={moveQueryMutation.isPending}
+              onClick={() => moveQueryTarget && moveQueryMutation.mutate({ id: moveQueryTarget.id, folderId: moveQueryFolderId ?? null })}
+            >
+              Move
+            </Button>
+          </Space>
+        }
+      >
+        <TreeSelect
+          style={{ width: '100%' }}
+          placeholder="Root (no folder)"
+          value={moveQueryFolderId}
+          onChange={(v) => setMoveQueryFolderId(v as string | undefined)}
+          treeData={folderTreeToSelectOptions(buildFolderTree(folders))}
+          allowClear
+          treeDefaultExpandAll
+          showSearch
+          treeNodeFilterProp="title"
+        />
+      </Modal>
+
+            {/* AI Report Modal */}
       <Modal
         title="AI Report"
         open={reportOpen}

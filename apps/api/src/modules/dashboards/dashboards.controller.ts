@@ -11,9 +11,11 @@ import {
   ParseUUIDPipe,
   HttpCode,
   HttpStatus,
+  Res,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
-import { DashboardsService } from './dashboards.service';
+import { DashboardsService, DashboardBundle } from './dashboards.service';
 import { CreateDashboardDto, UpdateDashboardDto } from './dto/dashboard.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
@@ -124,5 +126,29 @@ export class DashboardsController {
     @CurrentUser() user: User,
   ) {
     return this.dashboardsService.unshareWithUser(id, userId, user.tenantId);
+  }
+
+  // ─── Import / Export ─────────────────────────────────────────────────────────
+
+  @Get(':id/export')
+  @Roles(UserRole.ADMIN, UserRole.EDITOR)
+  @ApiOperation({ summary: 'Export a dashboard bundle (no credentials)' })
+  async exportBundle(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: User,
+    @Res() res: Response,
+  ) {
+    const bundle = await this.dashboardsService.exportBundle(id, user.tenantId);
+    const filename = `dashboard-${bundle.dashboard.name.replace(/[^a-z0-9]/gi, '_').toLowerCase()}.json`;
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(JSON.stringify(bundle, null, 2));
+  }
+
+  @Post('import')
+  @Roles(UserRole.ADMIN, UserRole.EDITOR)
+  @ApiOperation({ summary: 'Import a dashboard bundle' })
+  importBundle(@CurrentUser() user: User, @Body() bundle: DashboardBundle) {
+    return this.dashboardsService.importBundle(user.tenantId, user, bundle);
   }
 }

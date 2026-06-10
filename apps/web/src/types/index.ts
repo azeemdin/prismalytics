@@ -219,3 +219,25 @@ export interface PaginatedResponse<T> {
   page: number;
   limit: number;
 }
+
+export interface AutoDashboardProposal {
+  id: string;
+  title: string;
+  description: string;
+  chartType: ChartType;
+  sql: string;
+  category: 'metric' | 'chart' | 'table';
+  reasoning: string;
+  columnMapping?: Partial<{ value: string; xAxis: string; yAxis: string; label: string; series: string }>;
+}
+
+export interface AutoDashboardAnalysis {
+  proposals: AutoDashboardProposal[];
+}
+
+export interface AutoDashboardGenerateResult {
+  dashboardId: string;
+  queriesCreated: number;
+  chartsCreated: number;
+  folderName: string;
+}

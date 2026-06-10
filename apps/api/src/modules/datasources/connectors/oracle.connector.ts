@@ -146,9 +146,13 @@ export class OracleConnector implements DatabaseConnector {
     return { columns, rows, rowCount: rows.length, durationMs };
   }
 
-  async getSchema(): Promise<SchemaInfo> {
+  async getSchema(schema?: string): Promise<SchemaInfo> {
+    const useParam = !!schema;
     const tablesResult = await this.query(
-      "SELECT owner, table_name FROM all_tables WHERE owner = USER ORDER BY table_name",
+      useParam
+        ? 'SELECT owner, table_name FROM all_tables WHERE owner = :1 ORDER BY table_name'
+        : 'SELECT owner, table_name FROM all_tables WHERE owner = USER ORDER BY table_name',
+      useParam ? [schema] : [],
     );
 
     const tables = await Promise.all(

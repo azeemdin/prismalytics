@@ -1,10 +1,12 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import * as crypto from 'crypto';
-import { AiApiKey, AiUsageRecord, Datasource, Query, Tenant, AiPromptTemplate, User } from '../../database/entities';
+import { AiApiKey, AiUsageRecord, Datasource, Query, QueryFolder, QueryVisibility, QueryStatus, Tenant, AiPromptTemplate, User } from '../../database/entities';
 import type { AiProvider, PromptFeature } from '../../database/entities';
+import { DashboardStatus, DashboardVisibility } from '../../database/entities/dashboard.entity';
+import type { ChartType } from '../../database/entities/visualization.entity';
 import { SystemConfigService } from '../system-config/system-config.service';
 import { Dashboard } from '../../database/entities/dashboard.entity';
 import { Visualization } from '../../database/entities/visualization.entity';
@@ -16,6 +18,17 @@ export interface AiConfigStatus {
   provider: string;
   message: string;
   byokProviders: AiProvider[];
+}
+
+export interface AutoDashboardProposal {
+  id: string;
+  title: string;
+  description: string;
+  chartType: ChartType;
+  sql: string;
+  category: 'metric' | 'chart' | 'table';
+  reasoning: string;
+  columnMapping?: Partial<{ value: string; xAxis: string; yAxis: string; label: string; series: string }>;
 }
 
 // â”€â”€â”€ Encryption (mirrors datasources.service.ts) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -69,6 +82,7 @@ export class AiService {
     @InjectRepository(Dashboard) private dashboardRepo: Repository<Dashboard>,
     @InjectRepository(Visualization) private vizRepo: Repository<Visualization>,
     @InjectRepository(User) private userRepo: Repository<User>,
+    @InjectRepository(QueryFolder) private folderRepo: Repository<QueryFolder>,
   ) {}
 
   private async getCallTimeoutMs(): Promise<number> {
@@ -1031,5 +1045,259 @@ Return format:
       }
       throw new Error('LLM returned invalid JSON for alert rule generation');
     }
+  }
+
+  // ─── Auto Dashboard ───────────────────────────────────────────────────────────
+
+  async analyzeForAutoDashboard(
+    tenantId: string,
+    datasourceId: string,
+    selectedTables: string[],
+    userId?: string,
+    selectedSchema?: string,
+  ): Promise<{ proposals: AutoDashboardProposal[] }> {
+    const SQL_TYPES = ['postgresql', 'mysql', 'mssql', 'sqlite', 'oracle'];
+
+    const ds = await this.datasourceRepo.findOne({
+      where: { id: datasourceId, tenantId },
+      select: { id: true, type: true, name: true, config: true, encryptedPassword: true },
+    });
+    if (!ds) throw new NotFoundException('Datasource not found');
+
+    if (!SQL_TYPES.includes(ds.type)) {
+      throw new BadRequestException(
+        'Auto Dashboard requires a SQL datasource (PostgreSQL, MySQL, MSSQL, SQLite, Oracle)',
+      );
+    }
+
+    const password = ds.encryptedPassword ? decrypt(ds.encryptedPassword) : '';
+    const connector = createConnector(ds, password);
+
+    let tableSchemas: { name: string; schema?: string; columns: { name: string; type: string; nullable: boolean; isPrimary?: boolean }[] }[] = [];
+    try {
+      const schema = await connector.getSchema(selectedSchema);
+      tableSchemas = schema.tables.filter((t) => selectedTables.includes(t.name));
+    } catch (err) {
+      throw new BadRequestException(`Failed to read schema: ${(err as Error).message}`);
+    } finally {
+      await connector.close().catch(() => {});
+    }
+
+    if (tableSchemas.length === 0) {
+      throw new BadRequestException('None of the selected tables were found in the schema');
+    }
+
+    const schemaPrefix = selectedSchema ? `${selectedSchema}.` : '';
+    const schemaText = tableSchemas
+      .map(
+        (t) =>
+          `${schemaPrefix}${t.name}(${t.columns
+            .map((c) => `${c.name} ${c.type}${c.isPrimary ? ' PK' : ''}${!c.nullable ? ' NOT NULL' : ''}`)
+            .join(', ')})`,
+      )
+      .join('\n');
+
+    const proposalCount = Math.min(12, Math.max(6, selectedTables.length * 3));
+    const dbName = ((ds.config as Record<string, unknown>).database as string | undefined) ?? ds.name;
+    const dialectHints = this.getAutoDashboardDialectHints(ds.type);
+    const schemaQualifyRule = selectedSchema
+      ? `- ALWAYS qualify every table reference with the schema prefix: ${selectedSchema}.TableName — never omit it`
+      : '- Use table names exactly as listed above';
+
+    const fallbackPrompt = `You are a senior BI analyst. Analyze the following database schema and generate exactly ${proposalCount} diverse, high-value dashboard proposals.
+
+Database type: ${ds.type}
+Database name: ${dbName}${selectedSchema ? `\nSelected schema: ${selectedSchema}` : ''}
+
+Tables selected by the user (listed as schema.table):
+${schemaText}
+
+Requirements:
+- Generate a balanced mix: ~30% metric cards, ~50% charts, ~20% data tables
+- Metric cards (category "metric", chartType "metric"): single-row SELECT returning one numeric "value" column
+- Charts (category "chart"): chartType one of line, bar, area, pie, scatter, funnel
+- Tables (category "table"): chartType "table", return relevant columns with LIMIT 100
+- Every SQL must start with SELECT only — no mutations
+${schemaQualifyRule}
+- Column aliases must be lowercase with underscores
+- For metrics alias the result as "value"
+${dialectHints}
+
+Return ONLY a valid JSON object with no markdown fences, no explanation:
+{
+  "proposals": [
+    {
+      "id": "p1",
+      "title": "Short chart title (max 8 words)",
+      "description": "One sentence describing what this shows and why it matters",
+      "chartType": "metric|line|bar|area|pie|scatter|funnel|table",
+      "sql": "SELECT ...",
+      "category": "metric|chart|table",
+      "reasoning": "Why this KPI or visualization is important for this dataset",
+      "columnMapping": { "value": "col", "xAxis": "col", "yAxis": "col", "label": "col" }
+    }
+  ]
+}`;
+
+    const systemPrompt = await this.getSystemPrompt(tenantId, 'auto_dashboard', fallbackPrompt);
+    const result = await this.callLlm(tenantId, systemPrompt, userId, 'auto_dashboard');
+
+    let text = result.text.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim();
+
+    let parsed: { proposals: AutoDashboardProposal[] };
+    try {
+      parsed = JSON.parse(text) as { proposals: AutoDashboardProposal[] };
+    } catch {
+      const first = text.indexOf('{');
+      const last = text.lastIndexOf('}');
+      if (first !== -1 && last !== -1) {
+        parsed = JSON.parse(text.slice(first, last + 1)) as { proposals: AutoDashboardProposal[] };
+      } else {
+        throw new Error('LLM returned invalid JSON for auto dashboard analysis');
+      }
+    }
+
+    const SQL_ALLOWLIST = /^\s*SELECT\b/i;
+    const SQL_BLOCKLIST = /\b(INSERT|UPDATE|DELETE|DROP|TRUNCATE|CREATE|ALTER|GRANT|REVOKE|EXEC|EXECUTE)\b/i;
+
+    const cleanProposals = (parsed.proposals ?? [])
+      .filter((p) => p.sql && SQL_ALLOWLIST.test(p.sql) && !SQL_BLOCKLIST.test(p.sql))
+      .map((p, i) => ({
+        id: p.id ?? `p${i + 1}`,
+        title: p.title ?? `Chart ${i + 1}`,
+        description: p.description ?? '',
+        chartType: (p.chartType ?? 'table') as ChartType,
+        sql: p.sql,
+        category: (p.category ?? 'chart') as 'metric' | 'chart' | 'table',
+        reasoning: p.reasoning ?? '',
+        columnMapping: p.columnMapping ?? {},
+      }));
+
+    return { proposals: cleanProposals };
+  }
+
+  async generateAutoDashboard(
+    tenantId: string,
+    user: { id: string },
+    dto: {
+      dashboardName: string;
+      description?: string;
+      visibility?: string;
+      datasourceId: string;
+      proposals: AutoDashboardProposal[];
+    },
+  ): Promise<{ dashboardId: string; queriesCreated: number; chartsCreated: number; folderName: string }> {
+    const { dashboardName, description, visibility, datasourceId, proposals } = dto;
+
+    const dsCount = await this.datasourceRepo.count({ where: { id: datasourceId, tenantId } });
+    if (!dsCount) throw new NotFoundException('Datasource not found');
+
+    const folder = this.folderRepo.create({
+      tenantId,
+      createdById: user.id,
+      name: dashboardName,
+      visibility: QueryVisibility.EDITORS,
+    });
+    const savedFolder = await this.folderRepo.save(folder);
+
+    const dashboard = this.dashboardRepo.create({
+      tenantId,
+      createdById: user.id,
+      name: dashboardName,
+      description: description ?? undefined,
+      visibility: (visibility as DashboardVisibility) ?? DashboardVisibility.PRIVATE,
+      status: DashboardStatus.DRAFT,
+      layout: [],
+    });
+    const savedDashboard = await this.dashboardRepo.save(dashboard);
+
+    const SQL_ALLOWLIST = /^\s*SELECT\b/i;
+    const SQL_BLOCKLIST = /\b(INSERT|UPDATE|DELETE|DROP|TRUNCATE|CREATE|ALTER|GRANT|REVOKE|EXEC|EXECUTE)\b/i;
+
+    const vizItems: { vizId: string; chartType: string }[] = [];
+    let queriesCreated = 0;
+    let chartsCreated = 0;
+
+    for (const proposal of proposals) {
+      if (!SQL_ALLOWLIST.test(proposal.sql) || SQL_BLOCKLIST.test(proposal.sql)) {
+        this.logger.warn(`Auto dashboard: skipping "${proposal.title}" — invalid SQL`);
+        continue;
+      }
+      try {
+        const query = this.queryRepo.create({
+          tenantId,
+          createdById: user.id,
+          datasourceId,
+          name: `${dashboardName} — ${proposal.title}`,
+          sql: proposal.sql,
+          folderId: savedFolder.id,
+          visibility: QueryVisibility.EDITORS,
+          status: QueryStatus.PUBLISHED,
+        });
+        const savedQuery = await this.queryRepo.save(query);
+        queriesCreated++;
+
+        const viz = this.vizRepo.create({
+          tenantId,
+          dashboardId: savedDashboard.id,
+          queryId: savedQuery.id,
+          title: proposal.title,
+          chartType: proposal.chartType as ChartType,
+          columnMapping: proposal.columnMapping ?? undefined,
+          chartConfig: {},
+          sortOrder: chartsCreated,
+        });
+        const savedViz = await this.vizRepo.save(viz);
+        chartsCreated++;
+        vizItems.push({ vizId: savedViz.id, chartType: proposal.chartType as string });
+      } catch (err) {
+        this.logger.error(`Auto dashboard: failed to create "${proposal.title}": ${(err as Error).message}`);
+      }
+    }
+
+    savedDashboard.layout = this.computeAutoDashboardLayout(vizItems);
+    await this.dashboardRepo.save(savedDashboard);
+
+    return { dashboardId: savedDashboard.id, queriesCreated, chartsCreated, folderName: savedFolder.name };
+  }
+
+  private getAutoDashboardDialectHints(dsType: string): string {
+    const hints: Record<string, string> = {
+      postgresql: "- Use DATE_TRUNC('month', date_col) for monthly grouping; cast with ::date\n- Quote identifiers with double quotes when needed",
+      mysql: "- Use DATE_FORMAT(date_col, '%Y-%m') for monthly grouping\n- Use backticks for reserved-word identifiers",
+      mssql: "- Use FORMAT(date_col, 'yyyy-MM') or DATETRUNC for grouping\n- Use [square brackets] for identifiers",
+      sqlite: "- Use strftime('%Y-%m', date_col) for monthly grouping\n- No schema prefix",
+      oracle: "- Use TRUNC(date_col, 'MONTH') for monthly grouping; TO_CHAR for formatting\n- Use double quotes for case-sensitive identifiers",
+    };
+    return hints[dsType] ?? '';
+  }
+
+  private computeAutoDashboardLayout(
+    items: { vizId: string; chartType: string }[],
+  ): { i: string; x: number; y: number; w: number; h: number }[] {
+    const layout: { i: string; x: number; y: number; w: number; h: number }[] = [];
+    let curX = 0;
+    let curY = 0;
+    let rowH = 0;
+
+    for (const item of items) {
+      const isMetric = item.chartType === 'metric';
+      const isTable = item.chartType === 'table' || item.chartType === 'pivot';
+      // Grid has 12 columns. metrics: 3 per row (w=4), tables: full width (w=12), charts: 2 per row (w=6)
+      const w = isTable ? 12 : isMetric ? 4 : 6;
+      const h = isTable ? 8 : isMetric ? 3 : 5;
+
+      if (curX + w > 12) {
+        curX = 0;
+        curY += rowH;
+        rowH = 0;
+      }
+
+      layout.push({ i: item.vizId, x: curX, y: curY, w, h });
+      curX += w;
+      rowH = Math.max(rowH, h);
+    }
+
+    return layout;
   }
 }

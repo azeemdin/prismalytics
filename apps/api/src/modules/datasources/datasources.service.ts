@@ -265,7 +265,7 @@ export class DatasourcesService {
     }
   }
 
-  async getSchema(id: string, tenantId: string, user: User) {
+  async getSchema(id: string, tenantId: string, user: User, schema?: string) {
     const ds = await this.datasourceRepo.findOne({
       where: { id, tenantId },
       select: { id: true, type: true, config: true, encryptedPassword: true, createdById: true, visibility: true },
@@ -279,7 +279,7 @@ export class DatasourcesService {
     const password = ds.encryptedPassword ? decrypt(ds.encryptedPassword) : '';
     const connector = createConnector(ds, password);
     try {
-      return await connector.getSchema();
+      return await connector.getSchema(schema);
     } finally {
       await connector.close().catch(() => {});
     }

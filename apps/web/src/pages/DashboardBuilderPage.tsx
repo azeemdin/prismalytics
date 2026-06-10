@@ -223,6 +223,18 @@ function VizCard({
   const [queryData, setQueryData] = useState<QueryResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [execError, setExecError] = useState<string | null>(null);
+  const [chartHeight, setChartHeight] = useState(220);
+  const chartContainerRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = chartContainerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      const h = entries[0]?.contentRect.height ?? 0;
+      if (h > 0) setChartHeight(h);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   // Drill-down state: each item is one level clicked into
   const drillField = viz.chartConfig?.drillDownField as string | undefined;
@@ -346,7 +358,7 @@ function VizCard({
         </div>
       )}
 
-      <div style={{ flex: 1, minHeight: 0 }}>
+      <div ref={chartContainerRef} style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
         {loading ? (
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
             <Spin size="small" />
@@ -361,7 +373,7 @@ function VizCard({
             data={queryData ?? undefined}
             columnMapping={viz.columnMapping}
             chartConfig={viz.chartConfig}
-            height={220}
+            height={chartHeight}
             onElementClick={isClickable ? handleElementClick : undefined}
           />
         )}
@@ -661,7 +673,7 @@ export default function DashboardBuilderPage() {
       message.success('Chart added');
       setLayout((prev) => {
         const bottomY = prev.reduce((m, l) => Math.max(m, l.y + l.h), 0);
-        return [...prev, { i: created.id, x: 0, y: bottomY, w: 6, h: 4 }];
+        return [...prev, { i: created.id, x: 0, y: bottomY, w: 12, h: 5 }];
       });
     },
     onError: (err: unknown) => {
@@ -795,7 +807,7 @@ export default function DashboardBuilderPage() {
 
   const bottomY = layout.reduce((m, l) => Math.max(m, l.y + l.h), 0);
   const gridLayout = visualizations.map((v) => {
-    return layout.find((l) => l.i === v.id) ?? { i: v.id, x: 0, y: bottomY, w: 6, h: 4 };
+    return layout.find((l) => l.i === v.id) ?? { i: v.id, x: 0, y: bottomY, w: 12, h: 5 };
   });
 
   // Determine which column fields to show in the drawer based on chart type

@@ -105,8 +105,12 @@ export class DatasourcesController {
 
   @Get(':id/schema')
   @ApiOperation({ summary: 'Retrieve schema metadata (tables + columns)' })
-  getSchema(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: User) {
-    return this.datasourcesService.getSchema(id, user.tenantId, user);
+  getSchema(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: User,
+    @Query('schema') schema?: string,
+  ) {
+    return this.datasourcesService.getSchema(id, user.tenantId, user, schema);
   }
 
   @Post('upload')

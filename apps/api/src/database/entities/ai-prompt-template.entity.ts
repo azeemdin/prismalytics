@@ -7,7 +7,8 @@ export type PromptFeature =
   | 'chat_system'
   | 'dashboard_summary'
   | 'query_optimize'
-  | 'alert_rule_gen';
+  | 'alert_rule_gen'
+  | 'auto_dashboard';
 
 @Entity('ai_prompt_templates')
 @Index(['tenantId'])

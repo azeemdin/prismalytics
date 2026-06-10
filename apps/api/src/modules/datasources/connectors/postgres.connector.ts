@@ -74,14 +74,22 @@ export class PostgresConnector implements DatabaseConnector {
     }
   }
 
-  async getSchema(): Promise<SchemaInfo> {
-    const tablesResult = await this.query(`
-      SELECT t.table_schema, t.table_name
-      FROM information_schema.tables t
-      WHERE t.table_schema NOT IN ('pg_catalog', 'information_schema')
-        AND t.table_type = 'BASE TABLE'
-      ORDER BY t.table_schema, t.table_name
-    `);
+  async getSchema(schema?: string): Promise<SchemaInfo> {
+    const tablesResult = schema
+      ? await this.query(
+          `SELECT t.table_schema, t.table_name
+           FROM information_schema.tables t
+           WHERE t.table_schema = $1 AND t.table_type = 'BASE TABLE'
+           ORDER BY t.table_name`,
+          [schema],
+        )
+      : await this.query(`
+          SELECT t.table_schema, t.table_name
+          FROM information_schema.tables t
+          WHERE t.table_schema NOT IN ('pg_catalog', 'information_schema')
+            AND t.table_type = 'BASE TABLE'
+          ORDER BY t.table_schema, t.table_name
+        `);
 
     const tables = await Promise.all(
       tablesResult.rows.map(async (row) => {

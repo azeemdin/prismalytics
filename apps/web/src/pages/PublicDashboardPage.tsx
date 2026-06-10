@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import { Typography, Spin, Alert, Card, Space, Input, Button, Tag } from 'antd';
 import { BarChartOutlined, FilterOutlined, CloseCircleOutlined } from '@ant-design/icons';
@@ -62,6 +62,18 @@ function VizCardPublic({ viz, token, crossFilters, onCrossFilter }: VizCardPubli
   const [queryData, setQueryData] = useState<QueryResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [execError, setExecError] = useState<string | null>(null);
+  const [chartHeight, setChartHeight] = useState(220);
+  const chartContainerRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = chartContainerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      const h = entries[0]?.contentRect.height ?? 0;
+      if (h > 0) setChartHeight(h);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   // Inline parameter overrides for charts that declare parameters (shown as inputs)
   const declaredParams = viz.query?.parameters ?? [];
@@ -155,7 +167,7 @@ function VizCardPublic({ viz, token, crossFilters, onCrossFilter }: VizCardPubli
         </div>
       )}
 
-      <div style={{ flex: 1, minHeight: 0 }}>
+      <div ref={chartContainerRef} style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
         {loading ? (
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
             <Spin size="small" />
@@ -170,7 +182,7 @@ function VizCardPublic({ viz, token, crossFilters, onCrossFilter }: VizCardPubli
             data={queryData ?? undefined}
             columnMapping={viz.columnMapping}
             chartConfig={viz.chartConfig}
-            height={220}
+            height={chartHeight}
             onElementClick={handleElementClick}
           />
         )}

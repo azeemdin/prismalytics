@@ -65,12 +65,15 @@ export class MSSQLConnector implements DatabaseConnector {
     return { columns, rows, rowCount: rows.length, durationMs };
   }
 
-  async getSchema(): Promise<SchemaInfo> {
+  async getSchema(schema?: string): Promise<SchemaInfo> {
+    const schemaClause = schema
+      ? `AND TABLE_SCHEMA = '${schema.replace(/'/g, "''")}'`
+      : `AND TABLE_SCHEMA NOT IN ('sys','INFORMATION_SCHEMA','information_schema','guest')`;
     const tablesResult = await this.query(`
       SELECT TABLE_SCHEMA, TABLE_NAME
       FROM INFORMATION_SCHEMA.TABLES
       WHERE TABLE_TYPE = 'BASE TABLE'
-        AND TABLE_SCHEMA NOT IN ('sys','INFORMATION_SCHEMA','information_schema','guest')
+        ${schemaClause}
       ORDER BY TABLE_SCHEMA, TABLE_NAME
     `);
 

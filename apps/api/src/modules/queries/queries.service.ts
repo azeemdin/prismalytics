@@ -204,7 +204,9 @@ export class QueriesService {
 
     const isMongo = ds.type === 'mongodb';
     const isCsv = ds.type === 'csv';
-    if (!isMongo && !isCsv) {
+    const isRestApi = ds.type === 'rest_api';
+    const isElastic = ds.type === 'elasticsearch';
+    if (!isMongo && !isCsv && !isRestApi && !isElastic) {
       validateSql(dto.sql);
     }
 

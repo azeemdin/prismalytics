@@ -259,21 +259,17 @@ export default function AppLayout() {
     enabled: chatOpen,
   });
 
-  // Fetch schema for the selected datasource to extract schema/database names
-  const { data: dsSchemaInfo, isFetching: schemaFetching } = useQuery<{ tables: { schema?: string; name: string }[] }>({
-    queryKey: ['chat-ds-schema', chatDatasourceId],
+  // Fetch schema/database names — same endpoint as Query Editor
+  const { data: availableSchemas = [], isFetching: schemaFetching } = useQuery<string[]>({
+    queryKey: ['chat-ds-databases', chatDatasourceId],
     queryFn: async () => {
-      const { data } = await api.get(`/datasources/${chatDatasourceId}/schema`);
-      return data.data ?? data;
+      const { data } = await api.get(`/datasources/${chatDatasourceId}/databases`);
+      const payload = data.data ?? data;
+      return Array.isArray(payload) ? payload : [];
     },
     enabled: !!chatDatasourceId && chatOpen,
     staleTime: 5 * 60_000,
   });
-
-  // Unique schema names from the fetched schema
-  const availableSchemas = dsSchemaInfo
-    ? [...new Set(dsSchemaInfo.tables.map((t) => t.schema ?? 'public').filter(Boolean))].sort()
-    : [];
 
   // Reset schema filter when datasource changes
   const handleDatasourceChange = useCallback((val: string | undefined) => {

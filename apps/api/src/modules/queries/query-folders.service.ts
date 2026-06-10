@@ -5,8 +5,8 @@ import {
   BadRequestException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
-import { QueryFolder, QueryVisibility, User, TeamMember } from '../../database/entities';
+import { In, Repository } from 'typeorm';
+import { Query, QueryFolder, QueryVisibility, User, TeamMember } from '../../database/entities';
 import { CreateQueryFolderDto, UpdateQueryFolderDto } from './dto/query-folder.dto';
 
 @Injectable()
@@ -14,6 +14,7 @@ export class QueryFoldersService {
   constructor(
     @InjectRepository(QueryFolder) private folderRepo: Repository<QueryFolder>,
     @InjectRepository(TeamMember) private teamMemberRepo: Repository<TeamMember>,
+    @InjectRepository(Query) private queryRepo: Repository<Query>,
   ) {}
 
   async create(user: User, dto: CreateQueryFolderDto): Promise<QueryFolder> {
@@ -85,9 +86,22 @@ export class QueryFoldersService {
   }
 
   async delete(id: string, user: User): Promise<void> {
-    const folder = await this.findOwned(id, user);
-    // Queries with this folderId will have folder_id set to NULL via ON DELETE SET NULL
-    await this.folderRepo.remove(folder);
+    await this.findOwned(id, user);
+    // Collect every descendant folder ID (including the target)
+    const allIds = await this.collectDescendantIds(id, user.tenantId);
+    // Delete all queries in those folders
+    await this.queryRepo.delete({ folderId: In(allIds), tenantId: user.tenantId });
+    // Delete all folders (children first, then root)
+    await this.folderRepo.delete({ id: In(allIds), tenantId: user.tenantId });
+  }
+
+  private async collectDescendantIds(folderId: string, tenantId: string): Promise<string[]> {
+    const children = await this.folderRepo.find({ where: { parentId: folderId, tenantId }, select: { id: true } });
+    const ids: string[] = [folderId];
+    for (const child of children) {
+      ids.push(...(await this.collectDescendantIds(child.id, tenantId)));
+    }
+    return ids;
   }
 
   // Only the creator (or admin) can mutate a folder

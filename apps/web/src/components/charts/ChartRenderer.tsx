@@ -23,12 +23,30 @@ interface Props {
 
 const PALETTE = ['#6366f1', '#22c55e', '#f59e0b', '#3b82f6', '#ef4444', '#8b5cf6', '#06b6d4', '#ec4899'];
 
+// Normalize column names and row keys to lowercase so that columnMapping always
+// resolves correctly regardless of datasource case conventions (Oracle → UPPER,
+// PostgreSQL → lower, MSSQL → mixed).  Only applied inside chart rendering;
+// table/pivot views intentionally receive the original casing.
+function normalizeData(data: QueryResult): QueryResult {
+  if (!data.columns.some((c) => c.name !== c.name.toLowerCase())) return data;
+  return {
+    ...data,
+    columns: data.columns.map((c) => ({ ...c, name: c.name.toLowerCase() })),
+    rows: data.rows.map((r) => {
+      const out: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(r)) out[k.toLowerCase()] = v;
+      return out;
+    }),
+  };
+}
+
 function getColumnValues(data: QueryResult, col: string): unknown[] {
   return data.rows.map((r) => r[col]);
 }
 
 function buildOption(props: Props): unknown {
-  const { chartType, data, columnMapping, chartConfig = {} } = props;
+  const { chartType, columnMapping, chartConfig = {} } = props;
+  const data = props.data ? normalizeData(props.data) : props.data;
   if (!data || data.rows.length === 0) return {};
 
   const showLegend = chartConfig.legend !== false;
@@ -237,9 +255,10 @@ export default function ChartRenderer({ chartType, data, columnMapping, chartCon
     if (!data || data.rows.length === 0) {
       return <div style={{ height, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Text type="secondary">No data</Text></div>;
     }
-    const valCol = columnMapping?.value ?? data.columns[0]?.name ?? '';
-    const rawVal = data.rows[0]?.[valCol];
-    const label  = columnMapping?.label ? String(data.rows[0]?.[columnMapping.label] ?? valCol) : valCol;
+    const nd     = normalizeData(data);
+    const valCol = columnMapping?.value ?? nd.columns[0]?.name ?? '';
+    const rawVal = nd.rows[0]?.[valCol];
+    const label  = columnMapping?.label ? String(nd.rows[0]?.[columnMapping.label] ?? valCol) : valCol;
     return (
       <div style={{ height, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
         <Text style={{ fontSize: 48, fontWeight: 700, color: '#6366f1', lineHeight: 1 }}>
@@ -261,11 +280,12 @@ export default function ChartRenderer({ chartType, data, columnMapping, chartCon
     if (!data || data.rows.length === 0) {
       return <div style={{ height, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Text type="secondary">No data</Text></div>;
     }
-    const rowField    = (chartConfig?.rowField    as string) || data.columns[0]?.name || '';
-    const colField    = (chartConfig?.colField    as string) || data.columns[1]?.name || '';
-    const valueField  = (chartConfig?.valueField  as string) || data.columns[2]?.name || '';
+    const nd          = normalizeData(data);
+    const rowField    = ((chartConfig?.rowField    as string) || nd.columns[0]?.name || '').toLowerCase();
+    const colField    = ((chartConfig?.colField    as string) || nd.columns[1]?.name || '').toLowerCase();
+    const valueField  = ((chartConfig?.valueField  as string) || nd.columns[2]?.name || '').toLowerCase();
     const aggregation = (chartConfig?.aggregation as 'sum' | 'count' | 'avg' | 'min' | 'max') || 'sum';
-    return <PivotTable data={data} config={{ rowField, colField, valueField, aggregation }} height={height} />;
+    return <PivotTable data={nd} config={{ rowField, colField, valueField, aggregation }} height={height} />;
   }
 
   if (!data || data.rows.length === 0) {

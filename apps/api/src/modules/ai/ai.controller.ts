@@ -19,6 +19,7 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { User, UserRole } from '../../database/entities';
 import { AiService } from './ai.service';
+import type { AutoDashboardProposal } from './ai.service';
 import type { AiProvider, PromptFeature } from '../../database/entities';
 
 function assertAiEnabled(user: User) {
@@ -196,5 +197,36 @@ export class AiController {
     @Param('feature') feature: PromptFeature,
   ) {
     return this.aiService.deletePromptTemplate(user.tenantId, feature);
+  }
+
+  @Post('auto-dashboard/analyze')
+  @Roles(UserRole.ADMIN, UserRole.EDITOR)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Analyze selected tables and return AI-proposed metrics and charts' })
+  analyzeAutoDashboard(
+    @CurrentUser() user: User,
+    @Body() body: { datasourceId: string; selectedTables: string[]; selectedSchema?: string },
+  ) {
+    assertAiEnabled(user);
+    return this.aiService.analyzeForAutoDashboard(user.tenantId, body.datasourceId, body.selectedTables, user.id, body.selectedSchema);
+  }
+
+  @Post('auto-dashboard/generate')
+  @Roles(UserRole.ADMIN, UserRole.EDITOR)
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({ summary: 'Create queries, charts, and dashboard from AI-proposed items' })
+  generateAutoDashboard(
+    @CurrentUser() user: User,
+    @Body()
+    body: {
+      dashboardName: string;
+      description?: string;
+      visibility?: string;
+      datasourceId: string;
+      proposals: AutoDashboardProposal[];
+    },
+  ) {
+    assertAiEnabled(user);
+    return this.aiService.generateAutoDashboard(user.tenantId, user, body);
   }
 }

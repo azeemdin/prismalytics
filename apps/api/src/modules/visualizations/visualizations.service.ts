@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { IsNull, Repository } from 'typeorm';
+import { Repository } from 'typeorm';
 import { Visualization } from '../../database/entities';
 import { CreateVisualizationDto, UpdateVisualizationDto } from './dto/visualization.dto';
 
@@ -34,12 +34,12 @@ export class VisualizationsService {
     });
   }
 
-  // Library charts: standalone visualizations not attached to any dashboard
+  // Library: all tenant visualizations — includes standalone charts and auto-dashboard charts
   async findLibrary(tenantId: string) {
     return this.vizRepo.find({
-      where: { tenantId, dashboardId: IsNull() },
+      where: { tenantId },
       order: { createdAt: 'DESC' },
-      relations: ['query'],
+      relations: ['query', 'query.datasource'],
     });
   }
 
