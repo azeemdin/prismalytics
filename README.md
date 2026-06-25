@@ -159,7 +159,8 @@ prismalytics/
 
 ```bash
 cd docker
-docker compose -f docker-compose.prod.yml up -d
+cp .env.example .env   # fill in JWT_SECRET and any AI keys
+docker compose up -d
 ```
 ---
 

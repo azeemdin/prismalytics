@@ -72,7 +72,7 @@
         {
           "type": "password",
           "value": "admin123",
-          "temporary": false
+          "temporary": true
         }
       ],
       "realmRoles": ["prismalytics-admin"]
