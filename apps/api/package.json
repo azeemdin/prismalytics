@@ -42,7 +42,7 @@
     "joi": "^17.13.0",
     "mongodb": "^6.21.0",
     "mssql": "^12.5.4",
-    "mysql2": "^3.22.3",
+    "mysql2": "^3.23.1",
     "nestjs-pino": "^4.2.0",
     "nodemailer": "^9.0.1",
     "oracledb": "^6.7.0",
