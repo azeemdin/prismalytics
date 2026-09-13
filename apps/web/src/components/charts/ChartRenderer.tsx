@@ -6,16 +6,18 @@ import type { ChartType, QueryResult } from '../../types';
 
 const { Text } = Typography;
 
+interface ColumnMapping {
+  xAxis?: string;
+  yAxis?: string | string[];
+  series?: string;
+  value?: string;
+  label?: string;
+}
+
 interface Props {
   chartType: ChartType;
   data?: QueryResult;
-  columnMapping?: {
-    xAxis?: string;
-    yAxis?: string | string[];
-    series?: string;
-    value?: string;
-    label?: string;
-  };
+  columnMapping?: ColumnMapping;
   chartConfig?: Record<string, unknown>;
   height?: number;
   onElementClick?: (params: { field: string; value: unknown }) => void;
@@ -27,16 +29,42 @@ const PALETTE = ['#6366f1', '#22c55e', '#f59e0b', '#3b82f6', '#ef4444', '#8b5cf6
 // resolves correctly regardless of datasource case conventions (Oracle → UPPER,
 // PostgreSQL → lower, MSSQL → mixed).  Only applied inside chart rendering;
 // table/pivot views intentionally receive the original casing.
-function normalizeData(data: QueryResult): QueryResult {
-  if (!data.columns.some((c) => c.name !== c.name.toLowerCase())) return data;
+// `folded` reports whether the rename actually happened — every column reference
+// used against the returned data (columnMapping, chartConfig fields) must be
+// folded the same way, or lookups miss and every value reads as undefined.
+function normalizeData(data: QueryResult): { data: QueryResult; folded: boolean } {
+  const lowered = data.columns.map((c) => c.name.toLowerCase());
+  const needed  = data.columns.some((c, i) => c.name !== lowered[i]);
+  // Skip folding when it would collide: a case-sensitive datasource can expose
+  // both "Total" and "total", and merging them would silently drop a column.
+  if (!needed || new Set(lowered).size !== lowered.length) return { data, folded: false };
   return {
-    ...data,
-    columns: data.columns.map((c) => ({ ...c, name: c.name.toLowerCase() })),
-    rows: data.rows.map((r) => {
-      const out: Record<string, unknown> = {};
-      for (const [k, v] of Object.entries(r)) out[k.toLowerCase()] = v;
-      return out;
-    }),
+    data: {
+      ...data,
+      columns: data.columns.map((c, i) => ({ ...c, name: lowered[i] })),
+      rows: data.rows.map((r) => {
+        const out: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries(r)) out[k.toLowerCase()] = v;
+        return out;
+      }),
+    },
+    folded: true,
+  };
+}
+
+// columnMapping is captured from the query's original column names (Oracle hands
+// back CHANNEL / TOTAL), so it has to travel through the same fold as the rows.
+function normalizeMapping(mapping: ColumnMapping | undefined, folded: boolean): ColumnMapping {
+  if (!mapping) return {};
+  if (!folded) return mapping;
+  const fold = (v?: string) => (v === undefined ? undefined : v.toLowerCase());
+  return {
+    ...mapping,
+    xAxis:  fold(mapping.xAxis),
+    yAxis:  Array.isArray(mapping.yAxis) ? mapping.yAxis.map((c) => c.toLowerCase()) : fold(mapping.yAxis),
+    series: fold(mapping.series),
+    value:  fold(mapping.value),
+    label:  fold(mapping.label),
   };
 }
 
@@ -45,9 +73,10 @@ function getColumnValues(data: QueryResult, col: string): unknown[] {
 }
 
 function buildOption(props: Props): unknown {
-  const { chartType, columnMapping, chartConfig = {} } = props;
-  const data = props.data ? normalizeData(props.data) : props.data;
-  if (!data || data.rows.length === 0) return {};
+  const { chartType, chartConfig = {} } = props;
+  if (!props.data || props.data.rows.length === 0) return {};
+  const { data, folded } = normalizeData(props.data);
+  const columnMapping = normalizeMapping(props.columnMapping, folded);
 
   const showLegend = chartConfig.legend !== false;
   const isStacked  = Boolean(chartConfig.stacked);
@@ -255,10 +284,11 @@ export default function ChartRenderer({ chartType, data, columnMapping, chartCon
     if (!data || data.rows.length === 0) {
       return <div style={{ height, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Text type="secondary">No data</Text></div>;
     }
-    const nd     = normalizeData(data);
-    const valCol = columnMapping?.value ?? nd.columns[0]?.name ?? '';
+    const { data: nd, folded } = normalizeData(data);
+    const cm     = normalizeMapping(columnMapping, folded);
+    const valCol = cm.value ?? nd.columns[0]?.name ?? '';
     const rawVal = nd.rows[0]?.[valCol];
-    const label  = columnMapping?.label ? String(nd.rows[0]?.[columnMapping.label] ?? valCol) : valCol;
+    const label  = cm.label ? String(nd.rows[0]?.[cm.label] ?? valCol) : valCol;
     return (
       <div style={{ height, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
         <Text style={{ fontSize: 48, fontWeight: 700, color: '#6366f1', lineHeight: 1 }}>
@@ -280,10 +310,14 @@ export default function ChartRenderer({ chartType, data, columnMapping, chartCon
     if (!data || data.rows.length === 0) {
       return <div style={{ height, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Text type="secondary">No data</Text></div>;
     }
-    const nd          = normalizeData(data);
-    const rowField    = ((chartConfig?.rowField    as string) || nd.columns[0]?.name || '').toLowerCase();
-    const colField    = ((chartConfig?.colField    as string) || nd.columns[1]?.name || '').toLowerCase();
-    const valueField  = ((chartConfig?.valueField  as string) || nd.columns[2]?.name || '').toLowerCase();
+    const { data: nd, folded } = normalizeData(data);
+    const field = (configured: unknown, fallback?: string) => {
+      const name = (configured as string) || fallback || '';
+      return folded ? name.toLowerCase() : name;
+    };
+    const rowField    = field(chartConfig?.rowField,   nd.columns[0]?.name);
+    const colField    = field(chartConfig?.colField,   nd.columns[1]?.name);
+    const valueField  = field(chartConfig?.valueField, nd.columns[2]?.name);
     const aggregation = (chartConfig?.aggregation as 'sum' | 'count' | 'avg' | 'min' | 'max') || 'sum';
     return <PivotTable data={nd} config={{ rowField, colField, valueField, aggregation }} height={height} />;
   }
