@@ -34,14 +34,14 @@ const PALETTE = ['#6366f1', '#22c55e', '#f59e0b', '#3b82f6', '#ef4444', '#8b5cf6
 // folded the same way, or lookups miss and every value reads as undefined.
 function normalizeData(data: QueryResult): { data: QueryResult; folded: boolean } {
   const lowered = data.columns.map((c) => c.name.toLowerCase());
-  const needed  = data.columns.some((c, i) => c.name !== lowered[i]);
+  const needed  = data.columns.some((c) => c.name !== c.name.toLowerCase());
   // Skip folding when it would collide: a case-sensitive datasource can expose
   // both "Total" and "total", and merging them would silently drop a column.
   if (!needed || new Set(lowered).size !== lowered.length) return { data, folded: false };
   return {
     data: {
       ...data,
-      columns: data.columns.map((c, i) => ({ ...c, name: lowered[i] })),
+      columns: data.columns.map((c) => ({ ...c, name: c.name.toLowerCase() })),
       rows: data.rows.map((r) => {
         const out: Record<string, unknown> = {};
         for (const [k, v] of Object.entries(r)) out[k.toLowerCase()] = v;
