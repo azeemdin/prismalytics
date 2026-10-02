@@ -55,6 +55,10 @@ export class NotificationsService {
   private readonly logger = new Logger(NotificationsService.name);
   private transporter: Transporter;
   private systemConfig?: ISystemConfigService;
+  // Identity of the SMTP settings the cached transporter was built from. Used to
+  // detect that DB config has moved on (another replica saved it, or startup ran
+  // before the settings existed) and rebuild instead of mailing into a void.
+  private transporterKey = '';
 
   constructor(private readonly config: ConfigService) {
     // Silent on startup SystemConfigModule.onModuleInit() calls reinitialize() once DB is ready
@@ -114,31 +118,46 @@ export class NotificationsService {
     };
   }
 
-  async reinitialize(): Promise<void> {
+  private smtpKey(cfg: SmtpConfig): string {
+    return `${cfg.host}:${cfg.port}:${cfg.secure}:${cfg.user}`;
+  }
+
+  // Resolves the current SMTP settings and rebuilds the cached transporter when
+  // they no longer match the one in hand.
+  private async ensureTransporter(): Promise<SmtpConfig> {
     const cfg = await this.resolveSmtpConfig();
-    if (cfg.host) {
+    if (cfg.host && this.smtpKey(cfg) !== this.transporterKey) {
       this.transporter = this.buildTransporter(cfg);
-      this.logger.log(`SMTP transporter reinitialized: ${cfg.host}:${cfg.port}`);
-    } else {
+      this.transporterKey = this.smtpKey(cfg);
+      this.logger.log(`SMTP transporter built: ${cfg.host}:${cfg.port}`);
+    }
+    return cfg;
+  }
+
+  async reinitialize(): Promise<void> {
+    const cfg = await this.ensureTransporter();
+    if (!cfg.host) {
       this.transporter = this.buildTransporter();
+      this.transporterKey = '';
     }
   }
 
+  // Throws on failure. Callers decide how a failed send is recorded — swallowing
+  // the error here made every caller report deliveries that never happened.
   async sendEmail(opts: SendEmailOptions): Promise<void> {
-    const cfg = await this.resolveSmtpConfig();
-    const from = cfg.from || this.config.get<string>('SMTP_FROM') || 'prismalytics <noreply@prismalytics.dev>';
-    try {
-      const info = await this.transporter.sendMail({
-        from,
-        to: Array.isArray(opts.to) ? opts.to.join(', ') : opts.to,
-        subject: opts.subject,
-        html: opts.html,
-        text: opts.text,
-      });
-      this.logger.log(`Email sent: ${info.messageId}`);
-    } catch (err) {
-      this.logger.error(`Email send failed: ${(err as Error).message}`, (err as Error).stack);
+    const cfg = await this.ensureTransporter();
+    if (!cfg.host) {
+      throw new Error('SMTP is not configured — set it under System Settings before sending mail');
     }
+    const from = cfg.from || this.config.get<string>('SMTP_FROM') || 'prismalytics <noreply@prismalytics.dev>';
+    const info = await this.transporter.sendMail({
+      from,
+      to: Array.isArray(opts.to) ? opts.to.join(', ') : opts.to,
+      subject: opts.subject,
+      html: opts.html,
+      text: opts.text,
+    });
+    this.logger.log(`Email sent to ${Array.isArray(opts.to) ? opts.to.join(', ') : opts.to}: ${info.messageId}`);
   }
 
   async sendTestEmail(to: string): Promise<{ success: boolean; message: string }> {

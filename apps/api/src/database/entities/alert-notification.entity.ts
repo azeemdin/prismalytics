@@ -3,7 +3,7 @@ import { AlertRule } from './alert-rule.entity';
 import { User } from './user.entity';
 import { jsonColumn, tsColType } from '../column-helpers';
 
-export type AlertNotificationStatus = 'pending' | 'sent' | 'dismissed';
+export type AlertNotificationStatus = 'pending' | 'sent' | 'dismissed' | 'failed';
 
 @Entity('alert_notifications')
 @Index(['tenantId'])
@@ -46,6 +46,12 @@ export class AlertNotification {
 
   @Column({ default: 'pending' })
   status: AlertNotificationStatus;
+
+  // Per-channel dispatch failures, joined with '; '. Populated whenever a send
+  // is attempted and at least one channel errors — including 'sent' rows, where
+  // some channels succeeded and others did not.
+  @Column({ type: 'text', nullable: true })
+  error?: string;
 
   @Column({ name: 'sent_at', nullable: true })
   sentAt: Date;

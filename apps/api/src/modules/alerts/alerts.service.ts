@@ -7,7 +7,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config'; // still needed for REDIS_HOST/PORT
 import { Queue, Worker, Job } from 'bullmq';
 import IORedis from 'ioredis';
@@ -107,6 +107,10 @@ export class AlertsService implements OnModuleInit, OnModuleDestroy {
   private async addJobToQueue(rule: AlertRule): Promise<void> {
     if (!this.queue) return;
     const jobId = `alert-${rule.id}`;
+    // Clear any existing entry first so a rule can never end up on two schedules
+    // at once — including ones stranded by the old removal bug, which get swept
+    // up on the next restart via restoreJobs().
+    await this.removeJobFromQueue(rule.id);
     await this.queue.add(
       'evaluate-alert',
       { ruleId: rule.id } satisfies AlertJobPayload,
@@ -119,12 +123,25 @@ export class AlertsService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  private async removeJobFromQueue(ruleId: string, schedule: string): Promise<void> {
+  // Removes every repeatable entry for this rule. The previous version rebuilt the
+  // repeat key by hand as `${QUEUE_NAME}:${jobId}:::${schedule}`, but BullMQ keys
+  // repeatables by JOB name, not queue name — so the delete silently matched
+  // nothing and old schedules kept evaluating after an edit or a deactivation.
+  // Scanning and removing by the key BullMQ reports is version-proof and also
+  // clears entries stranded by that earlier bug.
+  private async removeJobFromQueue(ruleId: string): Promise<void> {
     if (!this.queue) return;
     const jobId = `alert-${ruleId}`;
-    await this.queue
-      .removeRepeatableByKey(`${QUEUE_NAME}:${jobId}:::${schedule}`)
-      .catch(() => {});
+    try {
+      const repeatables = await this.queue.getRepeatableJobs();
+      for (const entry of repeatables) {
+        if (entry.id === jobId) {
+          await this.queue.removeRepeatableByKey(entry.key);
+        }
+      }
+    } catch (err) {
+      this.logger.error(`Failed to remove repeatable job for rule ${ruleId}: ${(err as Error).message}`);
+    }
   }
 
   // â”€â”€â”€ CRUD â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -165,7 +182,6 @@ export class AlertsService implements OnModuleInit, OnModuleDestroy {
 
   async update(id: string, tenantId: string, dto: UpdateAlertDto): Promise<AlertRule> {
     const rule = await this.findOne(id, tenantId);
-    const oldSchedule = rule.schedule;
     const wasActive = rule.isActive;
     Object.assign(rule, dto);
     // update() cannot change isActive use activate/deactivate endpoints
@@ -173,7 +189,7 @@ export class AlertsService implements OnModuleInit, OnModuleDestroy {
     const saved = await this.ruleRepo.save(rule);
 
     if (wasActive) {
-      await this.removeJobFromQueue(id, oldSchedule);
+      await this.removeJobFromQueue(id);
       await this.addJobToQueue(saved);
     }
     return saved;
@@ -181,7 +197,7 @@ export class AlertsService implements OnModuleInit, OnModuleDestroy {
 
   async delete(id: string, tenantId: string): Promise<void> {
     const rule = await this.findOne(id, tenantId);
-    await this.removeJobFromQueue(id, rule.schedule);
+    await this.removeJobFromQueue(id);
     await this.ruleRepo.remove(rule);
   }
 
@@ -202,7 +218,7 @@ export class AlertsService implements OnModuleInit, OnModuleDestroy {
     if (!rule.isActive) return rule;
     rule.isActive = false;
     const saved = await this.ruleRepo.save(rule);
-    await this.removeJobFromQueue(id, rule.schedule);
+    await this.removeJobFromQueue(id);
     this.logger.log(`Alert rule ${id} deactivated by admin`);
     return saved;
   }
@@ -281,10 +297,20 @@ export class AlertsService implements OnModuleInit, OnModuleDestroy {
     // into auto-approve (sent immediately) and manual (pending admin confirmation).
     if (status === 'firing' && previousStatus !== 'firing' && rule.notificationsEnabled) {
       const message = `Alert "${rule.name}" is FIRING. Detected value ${value} ${conditionLabel(rule.condition, rule.threshold)}.`;
-      const autoChannels  = rule.channels.filter((c) => c.autoApprove === true);
-      const manualChannels = rule.channels.filter((c) => c.autoApprove !== true);
+      // Rows predating the channels column can read back NULL; without this the
+      // filter throws and the whole job fails after the evaluation was recorded,
+      // which looks exactly like "it fired but nothing happened".
+      const channels = rule.channels ?? [];
+      const autoChannels   = channels.filter((c) => c.autoApprove === true);
+      const manualChannels = channels.filter((c) => c.autoApprove !== true);
+
+      if (channels.length === 0) {
+        this.logger.warn(`Alert "${rule.name}" fired with notifications enabled but no channels configured`);
+      }
 
       if (autoChannels.length > 0) {
+        // Persist as pending first, dispatch, then record what actually happened —
+        // writing 'sent' up front made a silently failing SMTP look like a success.
         const autoNotif = await this.notifRepo.save(
           this.notifRepo.create({
             alertRuleId: rule.id,
@@ -296,12 +322,21 @@ export class AlertsService implements OnModuleInit, OnModuleDestroy {
             threshold: rule.threshold,
             condition: rule.condition,
             message,
-            status: 'sent',
-            sentAt: new Date(),
+            status: 'pending',
           }),
         );
-        await this.dispatchNotification(autoNotif);
-        this.logger.log(`Auto-approved notification dispatched for alert "${rule.name}" (${autoChannels.length} channel(s))`);
+        const errors = await this.dispatchNotification(autoNotif, 'auto');
+        const allFailed = errors.length === autoChannels.length;
+        autoNotif.status = allFailed ? 'failed' : 'sent';
+        autoNotif.error  = errors.length > 0 ? errors.join('; ') : undefined;
+        if (!allFailed) autoNotif.sentAt = new Date();
+        await this.notifRepo.save(autoNotif);
+
+        if (allFailed) {
+          this.logger.error(`Auto-approved notification FAILED for alert "${rule.name}": ${autoNotif.error}`);
+        } else {
+          this.logger.log(`Auto-approved notification dispatched for alert "${rule.name}" (${autoChannels.length - errors.length}/${autoChannels.length} channel(s) delivered)`);
+        }
       }
 
       if (manualChannels.length > 0) {
@@ -321,6 +356,13 @@ export class AlertsService implements OnModuleInit, OnModuleDestroy {
         );
         this.logger.log(`Pending notification created for alert "${rule.name}" admin confirmation required`);
       }
+    } else if (status === 'firing') {
+      // Says which gate stopped the dispatch; previously a firing evaluation that
+      // notified nobody left no trace at all.
+      const reason = previousStatus === 'firing'
+        ? 'already firing on the previous evaluation (notifications fire on transition only)'
+        : 'notifications are disabled for this rule';
+      this.logger.log(`Alert "${rule.name}" is firing but no notification was created: ${reason}`);
     }
   }
 
@@ -337,9 +379,11 @@ export class AlertsService implements OnModuleInit, OnModuleDestroy {
 
   // â”€â”€â”€ Notifications (admin-confirmed) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+  // 'failed' rows are listed alongside 'pending' ones: a notification whose
+  // dispatch errored still needs an admin to see it and retry.
   async findPendingNotifications(tenantId: string, page = 1, limit = 50) {
     const [notifications, total] = await this.notifRepo.findAndCount({
-      where: { tenantId, status: 'pending' },
+      where: { tenantId, status: In(['pending', 'failed']) },
       order: { createdAt: 'DESC' },
       skip: (page - 1) * limit,
       take: limit,
@@ -350,30 +394,51 @@ export class AlertsService implements OnModuleInit, OnModuleDestroy {
   async confirmNotification(notificationId: string, tenantId: string, adminUserId: string): Promise<AlertNotification> {
     const notif = await this.notifRepo.findOne({ where: { id: notificationId, tenantId } });
     if (!notif) throw new NotFoundException('Notification not found');
-    if (notif.status !== 'pending') {
+    // 'failed' is retryable — the admin may have just fixed the SMTP settings.
+    if (notif.status !== 'pending' && notif.status !== 'failed') {
       throw new BadRequestException(`Notification is already ${notif.status}`);
     }
 
-    // Send to all channels failures are logged but do not abort the whole operation
-    await this.dispatchNotification(notif);
+    const errors = await this.dispatchNotification(notif, 'manual');
+
+    // Every channel failed — keep it out of 'sent' and tell the admin why, rather
+    // than reporting a delivery that never happened.
+    if (errors.length > 0 && errors.length === notif.channels.length) {
+      notif.status = 'failed';
+      notif.error  = errors.join('; ');
+      await this.notifRepo.save(notif);
+      throw new BadRequestException(`Notification could not be delivered — ${notif.error}`);
+    }
 
     notif.status = 'sent';
     notif.sentAt = new Date();
     notif.sentById = adminUserId;
+    notif.error = errors.length > 0 ? errors.join('; ') : undefined;
     return this.notifRepo.save(notif);
   }
 
   async dismissNotification(notificationId: string, tenantId: string): Promise<AlertNotification> {
     const notif = await this.notifRepo.findOne({ where: { id: notificationId, tenantId } });
     if (!notif) throw new NotFoundException('Notification not found');
-    if (notif.status !== 'pending') {
+    if (notif.status !== 'pending' && notif.status !== 'failed') {
       throw new BadRequestException(`Notification is already ${notif.status}`);
     }
     notif.status = 'dismissed';
     return this.notifRepo.save(notif);
   }
 
-  private async dispatchNotification(notif: AlertNotification): Promise<void> {
+  // Attempts every channel and returns one message per FAILED channel, so the
+  // caller can record the outcome instead of reporting an unconditional success.
+  private async dispatchNotification(
+    notif: AlertNotification,
+    origin: 'auto' | 'manual',
+  ): Promise<string[]> {
+    const errors: string[] = [];
+    const detectedAt = (notif.createdAt ?? new Date()).toISOString();
+    const footer = origin === 'auto'
+      ? 'This channel is set to auto-approve, so prismalytics dispatched it without admin confirmation.'
+      : 'This notification was manually confirmed by an administrator in prismalytics.';
+
     for (const channel of notif.channels) {
       try {
         if (channel.type === 'email') {
@@ -386,19 +451,21 @@ export class AlertsService implements OnModuleInit, OnModuleDestroy {
               <table style="border-collapse:collapse;font-size:14px">
                 <tr><td style="padding:4px 12px;font-weight:bold">Value</td><td style="padding:4px 12px">${notif.detectedValue}</td></tr>
                 <tr><td style="padding:4px 12px;font-weight:bold">Condition</td><td style="padding:4px 12px">${conditionLabel(notif.condition, notif.threshold)}</td></tr>
-                <tr><td style="padding:4px 12px;font-weight:bold">Detected at</td><td style="padding:4px 12px">${notif.createdAt.toISOString()}</td></tr>
+                <tr><td style="padding:4px 12px;font-weight:bold">Detected at</td><td style="padding:4px 12px">${detectedAt}</td></tr>
               </table>
-              <p style="color:#888;font-size:12px">This notification was manually confirmed by an administrator in prismalytics.</p>
+              <p style="color:#888;font-size:12px">${footer}</p>
             `,
           });
         } else if (channel.type === 'slack') {
-          await fetch(channel.target, {
+          // fetch() resolves on 4xx/5xx — check the status or failures look like successes.
+          const res = await fetch(channel.target, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ text: notif.message }),
           });
+          if (!res.ok) throw new Error(`Slack responded ${res.status} ${res.statusText}`);
         } else if (channel.type === 'webhook') {
-          await fetch(channel.target, {
+          const res = await fetch(channel.target, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -411,11 +478,15 @@ export class AlertsService implements OnModuleInit, OnModuleDestroy {
               timestamp: notif.createdAt,
             }),
           });
+          if (!res.ok) throw new Error(`Webhook responded ${res.status} ${res.statusText}`);
         }
       } catch (err) {
-        this.logger.error(`Failed to dispatch ${channel.type} for notification ${notif.id}: ${(err as Error).message}`);
+        const detail = `${channel.type} → ${channel.target}: ${(err as Error).message}`;
+        errors.push(detail);
+        this.logger.error(`Dispatch failed for notification ${notif.id} — ${detail}`);
       }
     }
+    return errors;
   }
 
 }

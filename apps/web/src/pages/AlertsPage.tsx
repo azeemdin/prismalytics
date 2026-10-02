@@ -86,7 +86,8 @@ interface AlertNotification {
   threshold: number;
   condition: string;
   message: string;
-  status: 'pending' | 'sent' | 'dismissed';
+  status: 'pending' | 'sent' | 'dismissed' | 'failed';
+  error?: string;
   createdAt: string;
   sentAt?: string;
 }
@@ -155,7 +156,7 @@ function formatNextRun(next: Date | null): string {
 }
 
 const STATUS_COLOR: Record<string, string> = { ok: 'green', firing: 'red', error: 'orange' };
-const NOTIF_STATUS_COLOR: Record<string, string> = { pending: 'orange', sent: 'green', dismissed: 'default' };
+const NOTIF_STATUS_COLOR: Record<string, string> = { pending: 'orange', sent: 'green', dismissed: 'default', failed: 'red' };
 
 const CONDITION_LABEL: Record<string, string> = { gt: '>', lt: '<', eq: '=', gte: '>=', lte: '<=' };
 
@@ -297,7 +298,14 @@ export default function AlertsPage() {
       qc.invalidateQueries({ queryKey: ['alert-notifications-pending'] });
       message.success('Notification sent');
     },
-    onError: () => message.error('Failed to send notification'),
+    // Surface the server's reason (bad SMTP credentials, refused webhook, …) —
+    // a generic failure message is what made this silent in the first place.
+    onError: (err) => {
+      const detail = (err as { response?: { data?: { error?: { message?: string }; message?: string } } })
+        ?.response?.data?.error?.message
+        ?? (err as { response?: { data?: { message?: string } } })?.response?.data?.message;
+      message.error(detail ? `Failed to send: ${detail}` : 'Failed to send notification', 8);
+    },
   });
 
   const dismissNotifMutation = useMutation({
@@ -579,15 +587,17 @@ export default function AlertsPage() {
       title: 'Status',
       dataIndex: 'status',
       width: 100,
-      render: (s: string) => (
-        <Tag color={NOTIF_STATUS_COLOR[s] ?? 'default'}>{s.toUpperCase()}</Tag>
+      render: (s: string, n: AlertNotification) => (
+        <Tooltip title={n.error}>
+          <Tag color={NOTIF_STATUS_COLOR[s] ?? 'default'}>{s.toUpperCase()}</Tag>
+        </Tooltip>
       ),
     },
     {
       title: 'Actions',
       width: 180,
       render: (_: unknown, n: AlertNotification) =>
-        n.status === 'pending' ? (
+        n.status === 'pending' || n.status === 'failed' ? (
           <Space>
             <Popconfirm
               title="Send notification?"
@@ -602,7 +612,7 @@ export default function AlertsPage() {
                 icon={<SendOutlined />}
                 loading={sendNotifMutation.isPending}
               >
-                Send
+                {n.status === 'failed' ? 'Retry' : 'Send'}
               </Button>
             </Popconfirm>
             <Popconfirm
@@ -663,8 +673,8 @@ export default function AlertsPage() {
                   type="info"
                   showIcon
                   style={{ marginBottom: 16 }}
-                  message="Notifications require admin confirmation"
-                  description="When an alert fires and notifications are enabled, a pending entry appears here. No emails or webhooks are dispatched until you explicitly click Send."
+                  message="Notifications awaiting confirmation or retry"
+                  description="When an alert fires with notifications enabled, channels marked Auto are dispatched straight away; every other channel lands here and sends only when you click Send. Entries marked FAILED were attempted and rejected — hover the status for the reason, then Retry once it is resolved."
                 />
                 <Table
                   dataSource={pendingNotifications}
@@ -810,9 +820,15 @@ export default function AlertsPage() {
             name="notificationsEnabled"
             label="Notifications"
             valuePropName="checked"
-            help="When enabled and the rule is active, firing alerts create a pending notification for admin review. Still requires manual confirmation to send."
+            help={
+              editingRule
+                ? 'When enabled and the rule is active, a firing alert queues a notification for admin review. Channels marked Auto are dispatched immediately; the rest wait for confirmation under Pending Notifications.'
+                : 'Notifications are always off on a new rule — save it first, then reopen this dialog to enable them.'
+            }
           >
-            <Switch checkedChildren="Enabled" unCheckedChildren="Disabled" />
+            {/* The API forces notificationsEnabled=false on create, so offering an
+                editable toggle here would silently discard the choice. */}
+            <Switch checkedChildren="Enabled" unCheckedChildren="Disabled" disabled={!editingRule} />
           </Form.Item>
 
           <Form.List name="channels">

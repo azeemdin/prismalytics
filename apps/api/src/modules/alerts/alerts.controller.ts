@@ -46,6 +46,45 @@ export class AlertsController {
     return this.alertsService.create(user.tenantId, dto);
   }
 
+  // ─── Pending Notifications (admin-confirmed) ─────────────────────────────────
+  // Declared BEFORE the ':id' routes: Nest matches in declaration order, so a
+  // ':id' route above these would swallow /alerts/notifications/pending and
+  // reject it with a 400 from ParseUUIDPipe.
+
+  @Get('notifications/pending')
+  @Roles(UserRole.ADMIN)
+  @ApiOperation({ summary: 'Admin: list pending alert notifications awaiting confirmation' })
+  getPendingNotifications(
+    @CurrentUser() user: User,
+    @Query('page') page = 1,
+    @Query('limit') limit = 50,
+  ) {
+    return this.alertsService.findPendingNotifications(user.tenantId, +page, +limit);
+  }
+
+  @Post('notifications/:notificationId/send')
+  @Roles(UserRole.ADMIN)
+  @ApiOperation({ summary: 'Admin: confirm and send a pending notification' })
+  sendNotification(
+    @Param('notificationId', ParseUUIDPipe) notificationId: string,
+    @CurrentUser() user: User,
+  ) {
+    return this.alertsService.confirmNotification(notificationId, user.tenantId, user.id);
+  }
+
+  @Patch('notifications/:notificationId/dismiss')
+  @Roles(UserRole.ADMIN)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Admin: dismiss a pending notification without sending' })
+  dismissNotification(
+    @Param('notificationId', ParseUUIDPipe) notificationId: string,
+    @CurrentUser() user: User,
+  ) {
+    return this.alertsService.dismissNotification(notificationId, user.tenantId);
+  }
+
+  // ─── Rule routes ─────────────────────────────────────────────────────────────
+
   @Get(':id')
   @ApiOperation({ summary: 'Get alert rule by ID' })
   findOne(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: User) {
@@ -94,39 +133,5 @@ export class AlertsController {
     @Query('limit') limit = 20,
   ) {
     return this.alertsService.getEvaluations(id, user.tenantId, +page, +limit);
-  }
-
-  // ─── Pending Notifications (admin-confirmed) ─────────────────────────────────
-
-  @Get('notifications/pending')
-  @Roles(UserRole.ADMIN)
-  @ApiOperation({ summary: 'Admin: list pending alert notifications awaiting confirmation' })
-  getPendingNotifications(
-    @CurrentUser() user: User,
-    @Query('page') page = 1,
-    @Query('limit') limit = 50,
-  ) {
-    return this.alertsService.findPendingNotifications(user.tenantId, +page, +limit);
-  }
-
-  @Post('notifications/:notificationId/send')
-  @Roles(UserRole.ADMIN)
-  @ApiOperation({ summary: 'Admin: confirm and send a pending notification' })
-  sendNotification(
-    @Param('notificationId', ParseUUIDPipe) notificationId: string,
-    @CurrentUser() user: User,
-  ) {
-    return this.alertsService.confirmNotification(notificationId, user.tenantId, user.id);
-  }
-
-  @Patch('notifications/:notificationId/dismiss')
-  @Roles(UserRole.ADMIN)
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Admin: dismiss a pending notification without sending' })
-  dismissNotification(
-    @Param('notificationId', ParseUUIDPipe) notificationId: string,
-    @CurrentUser() user: User,
-  ) {
-    return this.alertsService.dismissNotification(notificationId, user.tenantId);
   }
 }
